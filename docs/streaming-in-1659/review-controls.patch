@@ -1,0 +1,41 @@
+--- a/dozer-sql/src/tests/builder_test.rs
++++ b/dozer-sql/src/tests/builder_test.rs
+@@ -592,3 +592,38 @@
+         assert!(format!("{:?}", result.err().unwrap()).contains("InvalidIdent"));
+     }
+ }
++
++#[tokio::test]
++async fn independent_cte_boundary_preserves_schema_except_source_and_forwards_events() {
++ use crate::product::table::factory::TableProcessorFactory;
++ use dozer_core::node::ProcessorFactory;
++ use dozer_sql_expression::builder::NameOrAlias;
++ use dozer_types::types::{FieldDefinition, FieldType, SourceDefinition, Field, Record, Operation, TableOperation};
++ use dozer_core::channels::ProcessorChannelForwarder;
++ let mut schema = Schema::new();
++ schema.field(FieldDefinition::new("k".into(), FieldType::Int, false, SourceDefinition::Table {connection: "conn".into(), name: "source".into()}), true);
++ schema.field(FieldDefinition::new("v".into(), FieldType::String, true, SourceDefinition::Dynamic), false);
++ let factory = TableProcessorFactory::new("bind-test".into(), NameOrAlias("local".into(),Some("local".into())));
++ let schemas = HashMap::from([(DEFAULT_PORT_HANDLE, schema.clone())]);
++ let actual = factory.get_output_schema(&DEFAULT_PORT_HANDLE, &schemas).await.unwrap();
++ let mut expected = schema;
++ for field in &mut expected.fields { field.source = SourceDefinition::Alias {name: "local".into()}; }
++ assert_eq!(actual, expected);
++ #[derive(Default)] struct Capture(Vec<TableOperation>);
++ impl ProcessorChannelForwarder for Capture {fn send(&mut self, op:TableOperation) { self.0.push(op); }}
++ let mut processor=factory.build(schemas, HashMap::new(), EventHub::new(1)).await.unwrap();
++ let record=Record::new(vec![Field::Int(7),Field::Null]);
++ for operation in [Operation::Insert {new:record.clone()},Operation::Update {old:record.clone(),new:record.clone()},Operation::Delete {old:record.clone()},Operation::BatchInsert {new:vec![record.clone(),record]}] {
++  let input=TableOperation::without_id(operation,DEFAULT_PORT_HANDLE);
++  let mut output=Capture::default(); processor.process(input.clone(), &mut output).unwrap();
++  assert_eq!(output.0,vec![input]);
++ }
++}
++
++#[test]
++fn independent_cte_unaliased_nested_join_control() {
++ let runtime = create_test_runtime();
++ let sql = "WITH local AS (SELECT Country FROM users), nested AS (WITH local AS (SELECT CustomerID FROM allowed) SELECT CustomerID FROM local) SELECT users.* INTO results FROM users JOIN local ON users.Country = local.Country JOIN nested ON users.CustomerID = nested.CustomerID";
++ let dag=membership_test_dag(sql,false,runtime.clone()).unwrap();
++ runtime.block_on(DagExecutor::new(dag,Default::default())).unwrap();
++}

@@ -1,0 +1,54 @@
+diff --git a/dozer-sql/src/product/join/membership.rs b/dozer-sql/src/product/join/membership.rs
+index c23a0f7..836f26a 100644
+--- a/dozer-sql/src/product/join/membership.rs
++++ b/dozer-sql/src/product/join/membership.rs
+@@ -1156,4 +1156,49 @@ mod tests {
+         assert_eq!(join.apply(1, insert(key(Some(7)))), vec![delete(a.clone())]);
+         assert!(join.apply(0, delete(a)).is_empty());
+     }
++
++    #[tokio::test]
++    async fn demo_streaming_membership_event_trace() {
++        println!("DEMO Candidate b407582b17f8fc9625735eb7483a6d9a33829769");
++        println!("DEMO Local synthetic execution of the actual Dozer membership processor");
++        let mut join = TestJoin::new("k IN (SELECT k FROM inner_rows)").await;
++        let a = row(1, Some(7), "a");
++        let b = row(1, Some(8), "b");
++        let c = row(1, Some(8), "updated");
++        let steps = vec![
++            ("Outer arrives before match", 0, insert(a.clone()), vec![]),
++            ("Late inner match emits retained row", 1, insert(key(Some(7))), vec![insert(a.clone())]),
++            ("Duplicate inner key does not multiply output", 1, insert(key(Some(7))), vec![]),
++            ("Retracting one duplicate keeps membership", 1, delete(key(Some(7))), vec![]),
++            ("Outer update becomes unmatched", 0, Operation::Update { old: a.clone(), new: b.clone() }, vec![delete(a)]),
++            ("Late second match emits updated outer row", 1, insert(key(Some(8))), vec![insert(b.clone())]),
++            ("Matched payload update stays an UPDATE", 0, Operation::Update { old: b.clone(), new: c.clone() }, vec![Operation::Update { old: b, new: c.clone() }]),
++            ("Last matching inner key retracts output", 1, delete(key(Some(8))), vec![delete(c.clone())]),
++            ("Atomic inner key update restores membership", 1, Operation::Update { old: key(Some(7)), new: key(Some(8)) }, vec![insert(c.clone())]),
++            ("Outer delete retracts emitted row", 0, delete(c.clone()), vec![delete(c)]),
++        ];
++        for (label, port, operation, expected) in steps {
++            println!("STEP {label}");
++            println!("INPUT port={port}: {operation:?}");
++            let output = join.apply(port, operation);
++            println!("OUTPUT {output:?}");
++            assert_eq!(output, expected);
++            println!("ASSERT PASS");
++        }
++        let mut not_in = TestJoin::new("k NOT IN (SELECT k FROM inner_rows)").await;
++        let null = row(2, None, "null-key");
++        for (label, port, operation, expected) in [
++            ("NOT IN: NULL outer with empty RHS", 0, insert(null.clone()), vec![insert(null.clone())]),
++            ("NOT IN: NULL inner makes result unknown", 1, insert(key(None)), vec![delete(null.clone())]),
++            ("NOT IN: empty RHS restores visibility", 1, delete(key(None)), vec![insert(null)]),
++        ] {
++            println!("STEP {label}");
++            println!("INPUT port={port}: {operation:?}");
++            let output = not_in.apply(port, operation);
++            println!("OUTPUT {output:?}");
++            assert_eq!(output, expected);
++            println!("ASSERT PASS");
++        }
++        println!("DEMO PASS: 13 actual incremental event assertions");
++    }
+ }

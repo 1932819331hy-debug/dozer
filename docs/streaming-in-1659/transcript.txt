@@ -1,0 +1,142 @@
+Dozer #1659 | streaming IN subqueries
+Local synthetic execution; no live database or service.
+Candidate: b407582b17f8fc9625735eb7483a6d9a33829769
+Tree: 77facdd1933ce97219310311f6bf0490f75a4d07
+
+This video replays a transcript captured from actual Rust tests.
+The demo adds test-only tracing; production code is unchanged.
+Port 0 = outer rows. Port 1 = inner SELECT results.
+Separate actual-DAG tests verify query planning and source wiring.
+
+Baseline: inner SELECT source was missing
+Historical regression run against baseline main:
+8b0b4cc021db089722cb3d48dbe915e8e9c532ec
+
+test builder::tests::streaming_in_registers_inner_source ... FAILED
+assertion `left == right` failed
+  left: ["outer_rows"]
+ right: ["inner_rows", "outer_rows"]
+
+Baseline log is included. The following panels show candidate execution.
+
+01/13 | Outer arrives before match
+INPUT port=0: Insert { new: Record { values: [Int(1), Int(7), String("a")], lifetime: None } }
+
+OUTPUT []
+
+ASSERT PASS
+
+
+02/13 | Late inner match emits retained row
+INPUT port=1: Insert { new: Record { values: [Int(7)], lifetime: None } }
+
+OUTPUT [Insert { new: Record { values: [Int(1), Int(7), String("a")], lifetime: None } }]
+
+ASSERT PASS
+
+
+03/13 | Duplicate inner key does not multiply output
+INPUT port=1: Insert { new: Record { values: [Int(7)], lifetime: None } }
+
+OUTPUT []
+
+ASSERT PASS
+
+
+04/13 | Retracting one duplicate keeps membership
+INPUT port=1: Delete { old: Record { values: [Int(7)], lifetime: None } }
+
+OUTPUT []
+
+ASSERT PASS
+
+
+05/13 | Outer update becomes unmatched
+INPUT port=0: Update { old: Record { values: [Int(1), Int(7), String("a")], lifetime: None },
+new: Record { values: [Int(1), Int(8), String("b")], lifetime: None } }
+
+OUTPUT [Delete { old: Record { values: [Int(1), Int(7), String("a")], lifetime: None } }]
+
+ASSERT PASS
+
+
+06/13 | Late second match emits updated outer row
+INPUT port=1: Insert { new: Record { values: [Int(8)], lifetime: None } }
+
+OUTPUT [Insert { new: Record { values: [Int(1), Int(8), String("b")], lifetime: None } }]
+
+ASSERT PASS
+
+
+07/13 | Matched payload update stays an UPDATE
+INPUT port=0: Update { old: Record { values: [Int(1), Int(8), String("b")], lifetime: None },
+new: Record { values: [Int(1), Int(8), String("updated")], lifetime: None } }
+
+OUTPUT [Update { old: Record { values: [Int(1), Int(8), String("b")], lifetime: None }, new:
+Record { values: [Int(1), Int(8), String("updated")], lifetime: None } }]
+
+ASSERT PASS
+
+
+08/13 | Last matching inner key retracts output
+INPUT port=1: Delete { old: Record { values: [Int(8)], lifetime: None } }
+
+OUTPUT [Delete { old: Record { values: [Int(1), Int(8), String("updated")], lifetime: None } }]
+
+ASSERT PASS
+
+
+09/13 | Atomic inner key update restores membership
+INPUT port=1: Update { old: Record { values: [Int(7)], lifetime: None }, new: Record { values:
+[Int(8)], lifetime: None } }
+
+OUTPUT [Insert { new: Record { values: [Int(1), Int(8), String("updated")], lifetime: None } }]
+
+ASSERT PASS
+
+
+10/13 | Outer delete retracts emitted row
+INPUT port=0: Delete { old: Record { values: [Int(1), Int(8), String("updated")], lifetime: None
+} }
+
+OUTPUT [Delete { old: Record { values: [Int(1), Int(8), String("updated")], lifetime: None } }]
+
+ASSERT PASS
+
+
+11/13 | NOT IN: NULL outer with empty RHS
+INPUT port=0: Insert { new: Record { values: [Int(2), Null, String("null-key")], lifetime: None
+} }
+
+OUTPUT [Insert { new: Record { values: [Int(2), Null, String("null-key")], lifetime: None } }]
+
+ASSERT PASS
+
+
+12/13 | NOT IN: NULL inner makes result unknown
+INPUT port=1: Insert { new: Record { values: [Null], lifetime: None } }
+
+OUTPUT [Delete { old: Record { values: [Int(2), Null, String("null-key")], lifetime: None } }]
+
+ASSERT PASS
+
+
+13/13 | NOT IN: empty RHS restores visibility
+INPUT port=1: Delete { old: Record { values: [Null], lifetime: None } }
+
+OUTPUT [Insert { new: Record { values: [Int(2), Null, String("null-key")], lifetime: None } }]
+
+ASSERT PASS
+
+
+Verified results and boundaries
+DEMO PASS: 13 actual incremental event assertions
+
+Frozen candidate clean suites: core 43; SQL 247; expression 30 passed.
+One pre-existing SQL test remained ignored. No failures.
+Independent review added two further passing SQL controls.
+
+Event-driven evaluation; no timer-driven refresh.
+TTL/windows unsupported; retained state is in memory.
+Right changes scan retained outer rows. Full CI remains unrun.
+Private deliverable; no submission or payment claim.
